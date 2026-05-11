@@ -57,14 +57,15 @@ jobs:
           URL="${{ github.event.inputs.file_url }}"
           CUSTOM="${{ github.event.inputs.custom_filename }}"
           mkdir -p tmp_downloads
+          cd tmp_downloads
           if [ -n "$CUSTOM" ]; then
             FILENAME="$CUSTOM"
+            aria2c --split=2 --max-connection-per-server=2 --min-split-size=90M --out="$FILENAME" "$URL"
           else
-            FILENAME=$(basename "$URL" | cut -d'?' -f1)
-            FILENAME=$(echo "$FILENAME" | sed 's/[^a-zA-Z0-9._() -]/_/g')
+            aria2c --split=2 --max-connection-per-server=2 --min-split-size=90M --content-disposition=true "$URL"
+            FILENAME=$(ls -1 | head -1)
           fi
-          echo "Downloading $URL -> $FILENAME"
-          aria2c --split=2 --max-connection-per-server=2 --min-split-size=90M --dir=tmp_downloads --out="$FILENAME" "$URL"
+          cd ..
           echo "FILENAME=$FILENAME" >> $GITHUB_ENV
           echo "UPLOAD_METHOD=${{ github.event.inputs.upload_method }}" >> $GITHUB_ENV
 
@@ -111,7 +112,7 @@ jobs:
         if: github.event.inputs.upload_method == 'release'
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: manual-${{ github.run_number }}
+          tag_name: tag-${{ github.run_number }}
           name: ${{ github.event.inputs.release_name != '' && github.event.inputs.release_name || 'Download from workflow' }}
           body: |
             File: ${{ env.FILENAME }}
