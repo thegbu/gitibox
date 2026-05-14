@@ -4,11 +4,11 @@ on:
   workflow_dispatch:
     inputs:
       file_url:
-        description: "Direct file URL"
+        description: "Direct file URL (comma-separated for multiple)"
         required: true
         type: string
       custom_filename:
-        description: "Custom output name"
+        description: "Custom output name (comma-separated for multiple)"
         required: false
         default: ""
         type: string
@@ -54,58 +54,76 @@ jobs:
 
       - name: Download file with aria2
         run: |
-          URL="${{ github.event.inputs.file_url }}"
-          CUSTOM="${{ github.event.inputs.custom_filename }}"
+          URLS_STR="${{ github.event.inputs.file_url }}"
+          CUSTOMS_STR="${{ github.event.inputs.custom_filename }}"
           mkdir -p tmp_downloads
           cd tmp_downloads
-          if [ -n "$CUSTOM" ]; then
-            FILENAME="$CUSTOM"
-            aria2c --split=2 --max-connection-per-server=2 --min-split-size=90M --out="$FILENAME" "$URL"
-          else
-            aria2c --split=2 --max-connection-per-server=2 --min-split-size=90M --content-disposition=true "$URL"
-            FILENAME=$(ls -1 | head -1)
-          fi
+          
+          IFS=',' read -ra URLS <<< "$URLS_STR"
+          IFS=',' read -ra CUSTOMS <<< "$CUSTOMS_STR"
+          
+          for i in "${!URLS[@]}"; do
+            URL=$(echo "${URLS[$i]}" | xargs)
+            [ -z "$URL" ] && continue
+            
+            NAME=""
+            if [ $i -lt ${#CUSTOMS[@]} ]; then
+              NAME=$(echo "${CUSTOMS[$i]}" | xargs)
+            fi
+            
+            if [ -n "$NAME" ]; then
+              aria2c --split=2 --max-connection-per-server=2 --min-split-size=90M --out="$NAME" "$URL"
+            else
+              aria2c --split=2 --max-connection-per-server=2 --min-split-size=90M --content-disposition=true "$URL"
+            fi
+          done
+          
           cd ..
-          echo "FILENAME=$FILENAME" >> $GITHUB_ENV
+          ALL_FILES=$(ls -1 tmp_downloads | paste -sd "," -)
+          echo "FILENAME=$ALL_FILES" >> $GITHUB_ENV
           echo "UPLOAD_METHOD=${{ github.event.inputs.upload_method }}" >> $GITHUB_ENV
 
       - name: Create 7z archive
         run: |
           cd tmp_downloads
-          FILE="$FILENAME"
           PASS="${{ github.event.inputs.zip_password }}"
+          UPLOAD_METHOD="${{ github.event.inputs.upload_method }}"
           if [ "$UPLOAD_METHOD" = "repository" ]; then
             THRESH_MB=90
           else
             THRESH_MB=2000
           fi
-          SIZE_BYTES=$(stat -c%s "$FILE")
-          SIZE_MB=$(( SIZE_BYTES / 1024 / 1024 ))
-          NEED_ARCHIVE=false
-          if [ "$SIZE_MB" -gt "$THRESH_MB" ]; then
-            NEED_ARCHIVE=true
-          fi
-          if [ -n "$PASS" ]; then
-            NEED_ARCHIVE=true
-          fi
-          if [ "$NEED_ARCHIVE" = false ]; then
+          
+          for FILE in *; do
+            [ -f "$FILE" ] || continue
+            
+            SIZE_BYTES=$(stat -c%s "$FILE")
+            SIZE_MB=$(( SIZE_BYTES / 1024 / 1024 ))
+            NEED_ARCHIVE=false
+            if [ "$SIZE_MB" -gt "$THRESH_MB" ] || [ -n "$PASS" ]; then
+              NEED_ARCHIVE=true
+            fi
+            
+            if [ "$NEED_ARCHIVE" = false ]; then
+              mkdir -p ../downloads
+              cp "$FILE" ../downloads/
+              continue
+            fi
+            
+            ARCHIVE_BASE="${FILE%.*}_$(date +%Y%m%d_%H%M%S)"
+            if [ -n "$PASS" ]; then
+              7z a -p"$PASS" -mhe=on -mx=3 -v${THRESH_MB}m "${ARCHIVE_BASE}.7z" "$FILE"
+            else
+              7z a -mx=3 -v${THRESH_MB}m "${ARCHIVE_BASE}.7z" "$FILE"
+            fi
+            
+            if [ -f "${ARCHIVE_BASE}.7z.001" ] && [ ! -f "${ARCHIVE_BASE}.7z.002" ]; then
+              mv "${ARCHIVE_BASE}.7z.001" "${ARCHIVE_BASE}.7z"
+            fi
             mkdir -p ../downloads
-            cp "$FILE" ../downloads/
-            cd ..
-            exit 0
-          fi
-          ARCHIVE_BASE="${FILE%.*}_$(date +%Y%m%d_%H%M%S)"
-          if [ -n "$PASS" ]; then
-            7z a -p"$PASS" -mhe=on -mx=3 -v${THRESH_MB}m "${ARCHIVE_BASE}.7z" "$FILE"
-          else
-            7z a -mx=3 -v${THRESH_MB}m "${ARCHIVE_BASE}.7z" "$FILE"
-          fi
-          rm -f "$FILE"
-          if [ -f "${ARCHIVE_BASE}.7z.001" ] && [ ! -f "${ARCHIVE_BASE}.7z.002" ]; then
-            mv "${ARCHIVE_BASE}.7z.001" "${ARCHIVE_BASE}.7z"
-          fi
-          mkdir -p ../downloads
-          mv ${ARCHIVE_BASE}.7z* ../downloads/
+            mv ${ARCHIVE_BASE}.7z* ../downloads/
+            rm -f "$FILE"
+          done
           cd ..
 
       - name: Upload to GitHub Releases
